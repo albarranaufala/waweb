@@ -55,6 +55,26 @@ export const config = {
 
   /** Optional system Chrome path; otherwise puppeteer's bundled Chromium is used. */
   puppeteerExecutablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+
+  /**
+   * WhatsApp Web stability (see README "Why does my profile keep logging out?").
+   * Pinning the web version stops WhatsApp's auto-updating SPA from drifting away
+   * from what whatsapp-web.js can drive, which is the most common cause of random
+   * forced logouts. `remote` serves a fixed version HTML from the wa-version mirror.
+   */
+  wwebVersion: str('WWEB_VERSION', '2.3000.1017054665'),
+  wwebCacheType: str('WWEB_VERSION_CACHE_TYPE', 'remote') as 'remote' | 'local' | 'none',
+  wwebRemotePath: str(
+    'WWEB_VERSION_REMOTE_PATH',
+    'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
+  ),
+  /** A current Chrome UA — an outdated UA makes WhatsApp more likely to drop the client. */
+  waUserAgent: str(
+    'WA_USER_AGENT',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  ),
+  /** Reclaim the session if another WhatsApp Web instance takes it over (CONFLICT). */
+  takeoverOnConflict: bool('WA_TAKEOVER_ON_CONFLICT', false),
 } as const;
 
 export type Config = typeof config;

@@ -57,6 +57,15 @@ export class Registry {
     return pc;
   }
 
+  /** Rebuild a profile's client to surface a fresh QR (after a forced logout). */
+  async relinkProfile(id: string): Promise<ProfileClient | undefined> {
+    const pc = this.clients.get(id);
+    if (!pc) return undefined;
+    await pc.relink();
+    await pc.waitForQrOrReady(config.qrWaitMs);
+    return pc;
+  }
+
   get(id: string): ProfileClient | undefined {
     return this.clients.get(id);
   }

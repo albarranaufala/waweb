@@ -103,8 +103,23 @@ export class ProfileClient {
   // ---- lifecycle -----------------------------------------------------------
 
   private buildClient(): void {
+    // Pin the WhatsApp Web version so WhatsApp's self-updating SPA can't drift
+    // away from what whatsapp-web.js knows how to drive (the usual cause of
+    // random forced logouts). Configurable / disableable via env.
+    const webVersionCache =
+      config.wwebCacheType === 'none'
+        ? { type: 'none' as const }
+        : config.wwebCacheType === 'local'
+          ? { type: 'local' as const }
+          : { type: 'remote' as const, remotePath: config.wwebRemotePath };
+
     this.client = new Client({
       authStrategy: new LocalAuth({ clientId: this.id, dataPath: config.sessionsDir }),
+      webVersion: config.wwebVersion,
+      webVersionCache,
+      userAgent: config.waUserAgent,
+      takeoverOnConflict: config.takeoverOnConflict,
+      takeoverTimeoutMs: config.takeoverOnConflict ? 10_000 : 0,
       puppeteer: {
         headless: true,
         executablePath: config.puppeteerExecutablePath,
@@ -113,6 +128,9 @@ export class ProfileClient {
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
           '--disable-gpu',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
         ],
       },
     });
@@ -450,6 +468,30 @@ export class ProfileClient {
   /** Build a MessageMedia from a remote URL. */
   static async mediaFromUrl(url: string): Promise<MessageMedia> {
     return MessageMedia.fromUrl(url, { unsafeMime: true });
+  }
+
+  /**
+   * Recover a profile that ended up `logged-out` (or any stale state): tear down
+   * the current Chromium and rebuild it so a fresh QR is surfaced — keeping the
+   * same profile id and metadata. If a session still exists on disk it simply
+   * reconnects without a QR.
+   */
+  async relink(): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    try {
+      await this.client.destroy();
+    } catch {
+      /* ignore */
+    }
+    this.destroyed = false;
+    this.reconnectAttempts = 0;
+    this.lastError = null;
+    this.clearQr();
+    this.buildClient();
+    await this.initialize();
   }
 
   /** Unlink the device from WhatsApp (removes the session on disk too). */

@@ -109,6 +109,11 @@ All config comes from environment variables (see [`.env.example`](.env.example))
 | `LOG_LEVEL`            | `info`        | pino level.                                         |
 | `LOG_PRETTY`           | `true`        | Pretty logs (`false` = JSON).                       |
 | `PUPPETEER_EXECUTABLE_PATH` | *(unset)* | Use a system Chrome/Chromium instead of bundled.    |
+| `WWEB_VERSION_CACHE_TYPE` | `remote`   | `remote` (pin) \| `local` \| `none` (always latest). |
+| `WWEB_VERSION`         | `2.3000.1017054665` | WhatsApp Web version to pin.                  |
+| `WWEB_VERSION_REMOTE_PATH` | *(wa-version mirror)* | Where to fetch the pinned version HTML.   |
+| `WA_USER_AGENT`        | *(modern Chrome)* | Browser UA presented to WhatsApp.               |
+| `WA_TAKEOVER_ON_CONFLICT` | `false`    | Reclaim the session on a `conflict`.                |
 
 ## Connection states
 
@@ -186,6 +191,16 @@ curl -s http://127.0.0.1:3000/profiles/9f1c.../qr | python3 -c 'import sys,json;
 ```
 
 When `state` becomes `connected`, you're linked.
+
+### `POST /profiles/:id/relink` — recover a logged-out profile
+
+If a profile ends up `logged-out` (WhatsApp unlinked the device), this rebuilds
+its client and returns a **fresh QR** — keeping the same profile id and metadata
+(no need to delete + recreate). Scan it, then poll `GET /profiles/:id/qr`.
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/profiles/9f1c.../relink
+```
 
 ### `DELETE /profiles/:id` — remove a profile
 
@@ -297,12 +312,43 @@ left as clearly-marked extension points in `src/wa/profileClient.ts`
 
 ## Troubleshooting
 
-- **Chromium fails to launch** — install system Chromium libs, or point
-  `PUPPETEER_EXECUTABLE_PATH` at an existing Chrome.
+### Why does my profile keep logging out? (`reason: "LOGOUT"`)
+
+A `disconnected` with `reason: "LOGOUT"` means **WhatsApp's server told the page
+to log out** — whatsapp-web.js emits it when the page navigates to `post_logout=1`
+or receives a `logout` command. Accompanying `Execution context was destroyed,
+most likely because of a navigation` lines are a *symptom* (code injection running
+while the page navigates to the logged-out screen), not the cause.
+
+The most common trigger is a **WhatsApp Web version mismatch**: by default the
+client loads WhatsApp's live, self-updating web app. When WhatsApp ships a new web
+build that whatsapp-web.js can't drive, WhatsApp rejects the device and force-logs
+it out — often minutes after a clean connect.
+
+This service mitigates that by **pinning the web version** (`WWEB_VERSION` via the
+`remote` cache) and sending a **modern user-agent**. If you still see logouts:
+
+1. Make sure `WWEB_VERSION_CACHE_TYPE=remote` (the default).
+2. Try a newer pinned `WWEB_VERSION` — browse the available builds at
+   <https://github.com/wppconnect-team/wa-version/tree/main/html> and set the one
+   you want (the `remotePath` already substitutes `{version}`).
+3. After a logout the session on disk is **deleted by the library**, so you must
+   re-scan: `POST /profiles/:id/relink` returns a fresh QR for the same profile.
+
+> Note: a persistent logout *can* also mean the number was flagged for automation,
+> or someone unlinked the device from the phone. If pinning doesn't help and only
+> one number is affected, suspect an account-side restriction — see the warning at
+> the top of this README.
+
+### Other issues
+
+- **Chromium fails to launch** — install system Chromium libs (on Ubuntu:
+  `sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libasound2`), or
+  point `PUPPETEER_EXECUTABLE_PATH` at an existing Chrome.
 - **Stuck on `qr-pending`** — the QR expires and refreshes automatically; re-poll
   `GET /profiles/:id/qr` to get the latest.
-- **`logged-out`** — the device was unlinked from the phone; the profile needs a
-  fresh QR scan.
+- **`logged-out`** — the device was unlinked; use `POST /profiles/:id/relink` to
+  get a fresh QR (see above).
 - **Poll send fails** — polls are sensitive to the WhatsApp Web build; the
   endpoint returns a clear `502` rather than crashing. The whatsapp-web.js
   version is pinned (`1.34.7`) for this reason.

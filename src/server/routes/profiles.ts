@@ -59,6 +59,19 @@ export function profilesRouter(registry: Registry): Router {
     }),
   );
 
+  router.post(
+    '/:id/relink',
+    asyncHandler(async (req, res) => {
+      const pc = await registry.relinkProfile(req.params.id);
+      if (!pc) throw notFound(`no profile ${req.params.id}`);
+      res.json({
+        ...pc.detail(),
+        qr: pc.qr(),
+        hint: 'Scan the QR (qr.dataUrl / qr.ascii). Poll GET /profiles/:id/qr until state=connected.',
+      });
+    }),
+  );
+
   router.delete(
     '/:id',
     asyncHandler(async (req, res) => {
