@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(npm install *)",
+      "Bash(node -e \"const D=require\\('better-sqlite3'\\); const d=new D\\(':memory:'\\); d.exec\\('create table t\\(x\\)'\\); console.log\\('better-sqlite3 OK'\\);\")",
+      "Bash(npm run *)"
+    ]
+  }
+}

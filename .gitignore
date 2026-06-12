@@ -1,0 +1,11 @@
+node_modules/
+dist/
+data/
+*.log
+
+# Local config
+.env
+
+# whatsapp-web.js / puppeteer artifacts (sessions live under DATA_DIR instead)
+.wwebjs_auth/
+.wwebjs_cache/
