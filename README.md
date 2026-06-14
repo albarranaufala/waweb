@@ -101,6 +101,7 @@ All config comes from environment variables (see [`.env.example`](.env.example))
 | `MESSAGE_DELAY_MIN_MS` | `800`         | Min pre-send delay (anti-ban jitter floor).         |
 | `MESSAGE_DELAY_MAX_MS` | `2500`        | Max pre-send delay.                                 |
 | `TYPING_SIMULATION`    | `true`        | Send a typing indicator before each message.        |
+| `SEND_ACK_TIMEOUT_MS`  | `5000`        | Wait for WhatsApp to confirm a send (ack); `0` = don't wait. |
 | `MAX_UPLOAD_MB`        | `32`          | Max multipart upload size.                          |
 | `QR_WAIT_MS`           | `25000`       | How long `POST /profiles` waits for the first QR.   |
 | `RECONNECT_BASE_MS`    | `2000`        | Reconnect backoff base.                             |
@@ -220,7 +221,7 @@ Fields:
 
 | Field        | Type             | Notes                                                                 |
 | ------------ | ---------------- | --------------------------------------------------------------------- |
-| `target`     | string (req.)    | Phone (`+62…`/`628…`) or group id (`…@g.us`). Normalized to a chatId.  |
+| `target`     | string (req.)    | Phone (`+62…`/`628…`), group id (`…@g.us`), or LID (`…@lid`). Normalized to a chatId. |
 | `text`       | string           | Message body, or caption when sending media.                          |
 | `mentions`   | string[]         | Phone numbers to tag. The text must contain an `@<number>` token for each. |
 | `media`      | file/url/base64  | See below. Image/video/file auto-detected by mimetype.                |
@@ -229,6 +230,19 @@ Fields:
 
 Before sending, the service verifies the target is registered on WhatsApp, sends
 a typing indicator, and applies the randomized delay.
+
+After sending, it waits up to `SEND_ACK_TIMEOUT_MS` for WhatsApp to confirm the
+message reached its servers (ack ≥ 1). The response reflects the **real** outcome
+rather than assuming success:
+
+```jsonc
+// 201 Created — confirmed
+{ "sent": true,  "message": { "id": "...", "ack": 1, "ackName": "server", "delivered": true,  "to": "628...@c.us" } }
+// 202 Accepted — queued but NOT confirmed (e.g. brand-new contact); may not arrive
+{ "sent": false, "message": { "id": "...", "ack": 0, "ackName": "pending", "delivered": false, "to": "628...@c.us" } }
+```
+
+`target` also accepts a `<id>@lid` chat id (sent directly, without a phone lookup).
 
 **Plain text:**
 
@@ -298,9 +312,14 @@ curl -s 'http://127.0.0.1:3000/profiles/9f1c.../chats?q=sales'
 ```json
 { "count": 2, "query": "sales", "chats": [
   { "id": "628...@c.us", "name": "Sales Lead", "type": "person", "isGroup": false,
-    "number": "628...", "unreadCount": 0, "lastMessageAt": 1718200000000 }
+    "phoneNumber": "628...", "number": "628...", "unreadCount": 0, "lastMessageAt": 1718200000000 }
 ] }
 ```
+
+`phoneNumber` is the **real** phone number (digits only). For contacts WhatsApp
+now addresses by an opaque LID (`<id>@lid`), the `id` stays the lid while
+`phoneNumber` is resolved to the actual number. `number` is a deprecated alias of
+`phoneNumber`. Either may be `undefined` when the number can't be resolved.
 
 ---
 

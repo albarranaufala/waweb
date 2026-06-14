@@ -39,6 +39,13 @@ export const config = {
   messageDelayMaxMs: int('MESSAGE_DELAY_MAX_MS', 2500),
   typingSimulation: bool('TYPING_SIMULATION', true),
 
+  /**
+   * After sending, how long to wait for WhatsApp to confirm the message reached
+   * its servers (ack >= 1) before reporting `delivered`. Set to 0 to skip waiting
+   * and report the immediate ack (restores the old optimistic behaviour).
+   */
+  sendAckTimeoutMs: int('SEND_ACK_TIMEOUT_MS', 5_000),
+
   /** Max multipart upload size, in megabytes. */
   maxUploadMb: int('MAX_UPLOAD_MB', 32),
 

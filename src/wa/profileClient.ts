@@ -1,4 +1,4 @@
-import { Client, LocalAuth, MessageMedia, Poll, type Message } from 'whatsapp-web.js';
+import { Client, LocalAuth, MessageAck, MessageMedia, Poll, type Message } from 'whatsapp-web.js';
 import qrcode from 'qrcode';
 import qrcodeTerminal from 'qrcode-terminal';
 import { config } from '../config';
@@ -31,10 +31,18 @@ export interface QrPayload {
 }
 
 export interface ChatSummary {
+  /** whatsapp-web.js chat id — may be `<n>@c.us`, `<n>@lid`, or `<id>@g.us`. */
   id: string;
   name: string;
   type: 'person' | 'group';
   isGroup: boolean;
+  /**
+   * Real phone number (digits only, e.g. `6285156348711`) for person chats, when
+   * resolvable. For `@lid` chats this is looked up from the linked contact, so it
+   * is the actual phone number — NOT the lid digits. `undefined` if unresolvable.
+   */
+  phoneNumber?: string;
+  /** @deprecated alias of `phoneNumber`, kept for backward compatibility. */
   number?: string;
   unreadCount: number;
   /** epoch ms of the last message, or null. */
@@ -58,6 +66,26 @@ const randomBetween = (min: number, max: number) =>
 
 function asciiQr(qr: string): Promise<string> {
   return new Promise((resolve) => qrcodeTerminal.generate(qr, { small: true }, resolve));
+}
+
+/** Human-readable label for a whatsapp-web.js MessageAck value. */
+function ackName(ack: number): string {
+  switch (ack) {
+    case MessageAck.ACK_ERROR:
+      return 'error';
+    case MessageAck.ACK_PENDING:
+      return 'pending';
+    case MessageAck.ACK_SERVER:
+      return 'server';
+    case MessageAck.ACK_DEVICE:
+      return 'device';
+    case MessageAck.ACK_READ:
+      return 'read';
+    case MessageAck.ACK_PLAYED:
+      return 'played';
+    default:
+      return `unknown(${ack})`;
+  }
 }
 
 /**
@@ -337,6 +365,15 @@ export class ProfileClient {
     to: string;
     type: string | null;
     ack: number | null;
+    /** Human-readable ack name (e.g. `server`, `device`, `error`, `pending`). */
+    ackName: string;
+    /**
+     * Whether WhatsApp confirmed the message at least reached its servers
+     * (ack >= 1) within the confirmation window. `false` means it stayed pending
+     * or errored — it likely did NOT reach the recipient (common for brand-new
+     * contacts / numbers never messaged before).
+     */
+    delivered: boolean;
   }> {
     if (this.state !== ConnectionState.Connected) {
       throw conflict(`profile is not connected (state=${this.state})`);
@@ -346,7 +383,10 @@ export class ProfileClient {
     let chatId = target.chatId;
 
     // Verify the target is registered / reachable on WhatsApp.
-    if (target.type === 'person') {
+    if (target.type === 'person' && target.isLid) {
+      // LIDs are opaque ids, not phone numbers — getNumberId() doesn't apply.
+      // Address the `@lid` chat directly (it came from an existing contact/chat).
+    } else if (target.type === 'person') {
       const numberId = await this.client.getNumberId(target.number!);
       if (!numberId) {
         throw unprocessable(`target ${params.target} is not registered on WhatsApp`);
@@ -425,13 +465,79 @@ export class ProfileClient {
       }
     }
 
+    // whatsapp-web.js resolves sendMessage() as soon as the message is *queued*,
+    // so a bare result is NOT proof of delivery — sends to brand-new contacts can
+    // sit at ACK_PENDING (0) or fail to ACK_ERROR (-1) afterwards. Wait briefly for
+    // the ack to advance to at least ACK_SERVER (reached WhatsApp's servers) so the
+    // caller learns the real outcome instead of an optimistic "sent: true".
+    const messageId = result.id?._serialized ?? null;
+    const ack = await this.waitForAck(messageId, result.ack ?? 0, config.sendAckTimeoutMs);
+    const delivered = ack >= MessageAck.ACK_SERVER;
+    if (!delivered) {
+      this.log.warn({ messageId, ack, to: chatId }, 'send not confirmed by WhatsApp');
+    }
+
     return {
-      id: result.id?._serialized ?? null,
+      id: messageId,
       timestamp: result.timestamp ? result.timestamp * 1000 : null,
       to: chatId,
       type: result.type ?? null,
-      ack: result.ack ?? null,
+      ack,
+      ackName: ackName(ack),
+      delivered,
     };
+  }
+
+  /**
+   * Wait until the given message's ack reaches a terminal-enough state — either it
+   * reached WhatsApp's servers (>= ACK_SERVER) or definitively failed (ACK_ERROR) —
+   * or the timeout elapses. Returns the best ack observed. Resolves immediately if
+   * the ack is already conclusive or no message id is available to track.
+   */
+  private async waitForAck(
+    messageId: string | null,
+    current: number,
+    timeoutMs: number,
+  ): Promise<number> {
+    const conclusive = (ack: number) => ack >= MessageAck.ACK_SERVER || ack === MessageAck.ACK_ERROR;
+    if (!messageId || conclusive(current)) return current;
+
+    // The server ack can arrive during the awaited typing-state cleanup, before we
+    // attach the listener below — so take one authoritative reading first.
+    const fresh = await this.currentAck(messageId, current);
+    if (conclusive(fresh)) return fresh;
+
+    return new Promise((resolve) => {
+      let best = fresh;
+      let settled = false;
+      const finish = (ack: number) => {
+        if (settled) return;
+        settled = true;
+        this.client.off('message_ack', onAck);
+        clearTimeout(timer);
+        resolve(ack);
+      };
+      const onAck = (msg: Message, ack: number) => {
+        if (msg.id?._serialized !== messageId) return;
+        best = ack;
+        if (conclusive(ack)) finish(ack);
+      };
+      this.client.on('message_ack', onAck);
+      // On timeout, re-read once more in case the event was missed entirely.
+      const timer = setTimeout(() => {
+        void this.currentAck(messageId, best).then(finish);
+      }, Math.max(0, timeoutMs));
+    });
+  }
+
+  /** Best-effort read of a message's current ack, falling back on any error. */
+  private async currentAck(messageId: string, fallback: number): Promise<number> {
+    try {
+      const msg = await this.client.getMessageById(messageId);
+      return msg?.ack ?? fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   /** List chats (people + groups), optionally filtered by a name/number query. */
@@ -440,15 +546,33 @@ export class ProfileClient {
       throw conflict(`profile is not connected (state=${this.state})`);
     }
     const chats = await this.client.getChats();
-    let mapped: ChatSummary[] = chats.map((c) => ({
-      id: c.id._serialized,
-      name: c.name ?? c.id.user,
-      type: c.isGroup ? 'group' : 'person',
-      isGroup: c.isGroup,
-      number: c.isGroup ? undefined : c.id.user,
-      unreadCount: c.unreadCount ?? 0,
-      lastMessageAt: c.timestamp ? c.timestamp * 1000 : null,
-    }));
+
+    // Resolve REAL phone numbers for person chats. For `@c.us` chats the id's user
+    // part already IS the phone number. For `@lid` chats the user part is an opaque
+    // lid, so we must look up the linked phone number — batched into a single
+    // round-trip to keep this cheap and avoid per-chat WhatsApp queries.
+    const lidIds = chats
+      .filter((c) => !c.isGroup && c.id.server === 'lid')
+      .map((c) => c.id._serialized);
+    const phoneByLid = await this.resolveLidPhones(lidIds);
+
+    let mapped: ChatSummary[] = chats.map((c) => {
+      let phoneNumber: string | undefined;
+      if (!c.isGroup) {
+        phoneNumber =
+          c.id.server === 'lid' ? phoneByLid.get(c.id._serialized) : c.id.user;
+      }
+      return {
+        id: c.id._serialized,
+        name: c.name ?? c.id.user,
+        type: c.isGroup ? 'group' : 'person',
+        isGroup: c.isGroup,
+        phoneNumber,
+        number: phoneNumber,
+        unreadCount: c.unreadCount ?? 0,
+        lastMessageAt: c.timestamp ? c.timestamp * 1000 : null,
+      };
+    });
 
     if (query && query.trim()) {
       const q = query.trim().toLowerCase();
@@ -457,12 +581,33 @@ export class ProfileClient {
         (c) =>
           c.name.toLowerCase().includes(q) ||
           c.id.toLowerCase().includes(q) ||
-          (qDigits.length > 0 && (c.number?.includes(qDigits) ?? false)),
+          (qDigits.length > 0 && (c.phoneNumber?.includes(qDigits) ?? false)),
       );
     }
 
     mapped.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
     return mapped;
+  }
+
+  /**
+   * Map a batch of `@lid` ids to their real phone numbers (digits only), using
+   * whatsapp-web.js's LID↔phone resolver in a single round-trip. Missing/unknown
+   * lids are simply absent from the result map; resolution failures degrade to an
+   * empty map rather than failing the whole chat list.
+   */
+  private async resolveLidPhones(lidIds: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (!lidIds.length) return out;
+    try {
+      const pairs = await this.client.getContactLidAndPhone(lidIds);
+      for (const { lid, pn } of pairs) {
+        const digits = onlyDigits(pn ?? '');
+        if (lid && digits) out.set(lid, digits);
+      }
+    } catch (err) {
+      this.log.warn({ err }, 'failed to resolve LID phone numbers');
+    }
+    return out;
   }
 
   /** Build a MessageMedia from a remote URL. */

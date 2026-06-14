@@ -139,7 +139,10 @@ export function messagesRouter(registry: Registry): Router {
       });
 
       const result = await pc.send({ target, text, mentions, media, asDocument, poll });
-      res.status(201).json({ sent: true, message: result });
+      // `sent` reflects WhatsApp's actual confirmation (ack), not just that the
+      // request was accepted — an unconfirmed send (e.g. to a brand-new contact)
+      // returns sent:false with a 202 so callers don't assume it arrived.
+      res.status(result.delivered ? 201 : 202).json({ sent: result.delivered, message: result });
     }),
   );
 
